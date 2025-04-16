@@ -80,12 +80,18 @@ class PomodoroTimer:
         self.timer_type = "work"  # work, short_break, long_break
         self.remaining_time = self.work_duration
         self.timer_id = None
+        self.transition_timer = None  # New: for handling session transitions
 
     def start(self, timer_type="work"):
         if self.is_running:
             # If timer is running, cancel it first
             self.master.after_cancel(self.timer_id)
             self.is_running = False
+        
+        # Cancel any pending transition
+        if self.transition_timer:
+            self.master.after_cancel(self.transition_timer)
+            self.transition_timer = None
         
         # Start the new timer
         self.is_running = True
@@ -102,41 +108,59 @@ class PomodoroTimer:
         if self.is_running:
             self.master.after_cancel(self.timer_id)
             self.is_running = False
+        if self.transition_timer:
+            self.master.after_cancel(self.transition_timer)
+            self.transition_timer = None
 
     def reset(self):
         if self.timer_id:
             self.master.after_cancel(self.timer_id)
+        if self.transition_timer:
+            self.master.after_cancel(self.transition_timer)
+            self.transition_timer = None
         self.is_running = False
         self.current_cycle = 0
         self.timer_type = "work"
         self.remaining_time = self.work_duration
         self.update_callback(self.format_time(self.remaining_time), self.current_cycle, self.timer_type)
 
+    def handle_session_end(self):
+        if self.timer_type == "work":
+            # End of a work session
+            self.current_cycle += 1
+            if self.current_cycle >= self.total_cycles:
+                messagebox.showinfo("Pomodoro Timer", "All cycles completed!")
+                self.reset()
+                return
+            else:
+                # Start a break based on cycle count
+                if self.current_cycle % 4 == 0:
+                    self.timer_type = "long_break"
+                    self.remaining_time = self.long_break_duration
+                else:
+                    self.timer_type = "short_break"
+                    self.remaining_time = self.short_break_duration
+        else:
+            # End of a break session
+            self.timer_type = "work"
+            self.remaining_time = self.work_duration
+        
+        # Start the next session after a delay
+        self.is_running = True
+        self.countdown()
+
     def countdown(self):
         if self.remaining_time <= 0:
-            if self.timer_type == "work":
-                # End of a work session
-                self.current_cycle += 1
-                if self.current_cycle >= self.total_cycles:
-                    messagebox.showinfo("Pomodoro Timer", "All cycles completed!")
-                    self.reset()
-                    return
-                else:
-                    # Start a break based on cycle count
-                    if self.current_cycle % 4 == 0:
-                        self.timer_type = "long_break"
-                        self.remaining_time = self.long_break_duration
-                    else:
-                        self.timer_type = "short_break"
-                        self.remaining_time = self.short_break_duration
-            else:
-                # End of a break session
-                self.timer_type = "work"
-                self.remaining_time = self.work_duration
-            self.update_callback(self.format_time(self.remaining_time), self.current_cycle, self.timer_type)
-        else:
-            self.update_callback(self.format_time(self.remaining_time), self.current_cycle, self.timer_type)
-            self.remaining_time -= 1
+            # Update display to show 00:00
+            self.update_callback(self.format_time(0), self.current_cycle, self.timer_type)
+            
+            # Schedule the next session after a delay (2 seconds)
+            if self.transition_timer is None:  # Only schedule if not already scheduled
+                self.transition_timer = self.master.after(2000, self.handle_session_end)
+            return
+        
+        self.update_callback(self.format_time(self.remaining_time), self.current_cycle, self.timer_type)
+        self.remaining_time -= 1
         self.timer_id = self.master.after(1000, self.countdown)
 
     def format_time(self, seconds):
@@ -157,8 +181,17 @@ class ProductivityApp:
     def __init__(self, master):
         self.master = master
         master.title("Productivity App")
-        master.geometry("900x600")  # Increased window size
         
+        # Add debounce timer
+        self.settings_update_timer = None
+        self.settings_debounce_delay = 1000  # 1 second delay
+
+        # Add animation variables
+        self.shake_animation_id = None
+        self.shake_count = 0
+        self.original_timer_pos = None
+        self.is_timer_red = False
+
         # Set application icon
         try:
             import os
@@ -201,6 +234,41 @@ class ProductivityApp:
 
         # Build UI Components
         self.build_ui()
+        # Load saved settings from file
+        self.load_settings()
+
+    def load_settings(self):
+        """Load timer settings from a JSON file"""
+        settings_file = 'timer_settings.json'
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, 'r') as f:
+                    settings = json.load(f)
+                    self.work_entry.delete(0, tk.END)
+                    self.work_entry.insert(0, str(settings.get('work_duration', 25)))
+                    self.short_break_entry.delete(0, tk.END)
+                    self.short_break_entry.insert(0, str(settings.get('short_break', 5)))
+                    self.long_break_entry.delete(0, tk.END)
+                    self.long_break_entry.insert(0, str(settings.get('long_break', 15)))
+                    self.cycles_entry.delete(0, tk.END)
+                    self.cycles_entry.insert(0, str(settings.get('cycles', 4)))
+                    self.update_timer_settings()
+            except Exception as e:
+                print(f"Error loading settings: {e}")
+
+    def save_settings(self):
+        """Save timer settings to a JSON file"""
+        settings = {
+            'work_duration': int(self.work_entry.get()),
+            'short_break': int(self.short_break_entry.get()),
+            'long_break': int(self.long_break_entry.get()),
+            'cycles': int(self.cycles_entry.get())
+        }
+        try:
+            with open('timer_settings.json', 'w') as f:
+                json.dump(settings, f)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
 
     def build_ui(self):
         self.master.configure(bg=self.theme["bg"])
@@ -337,8 +405,8 @@ class ProductivityApp:
         self.timer_label.pack(pady=20)
 
         # Timer Control Buttons with modern styling
-        controls_frame = tk.Frame(self.right_frame, bg=self.theme["bg"])
-        controls_frame.pack(pady=20)
+        self.controls_frame = tk.Frame(self.right_frame, bg=self.theme["bg"])  # Change to instance variable
+        self.controls_frame.pack(pady=20)
         
         button_style = {
             "font": ("Segoe UI", 11, "bold"),
@@ -348,7 +416,7 @@ class ProductivityApp:
         }
         
         # Timer type buttons
-        timer_types_frame = tk.Frame(controls_frame, bg=self.theme["bg"])
+        timer_types_frame = tk.Frame(self.controls_frame, bg=self.theme["bg"])
         timer_types_frame.pack(pady=(0, 10))
         
         start_pomo_button = tk.Button(timer_types_frame, text="Start Pomodoro",
@@ -373,7 +441,7 @@ class ProductivityApp:
         start_long_break_button.pack(side=tk.LEFT, padx=5)
         
         # Control buttons
-        control_buttons_frame = tk.Frame(controls_frame, bg=self.theme["bg"])
+        control_buttons_frame = tk.Frame(self.controls_frame, bg=self.theme["bg"])
         control_buttons_frame.pack()
         
         pause_button = tk.Button(control_buttons_frame, text="Pause",
@@ -416,37 +484,38 @@ class ProductivityApp:
         self.work_entry = tk.Entry(settings_frame, **entry_style)
         self.work_entry.grid(row=0, column=1, pady=5)
         self.work_entry.insert(0, "25")
+        self.work_entry.bind('<KeyRelease>', self.schedule_settings_update)
         
         # Short break duration setting
         tk.Label(settings_frame, text="Short Break (min):", **label_style).grid(row=1, column=0, pady=5)
         self.short_break_entry = tk.Entry(settings_frame, **entry_style)
         self.short_break_entry.grid(row=1, column=1, pady=5)
         self.short_break_entry.insert(0, "5")
+        self.short_break_entry.bind('<KeyRelease>', self.schedule_settings_update)
         
         # Long break duration setting
         tk.Label(settings_frame, text="Long Break (min):", **label_style).grid(row=2, column=0, pady=5)
         self.long_break_entry = tk.Entry(settings_frame, **entry_style)
         self.long_break_entry.grid(row=2, column=1, pady=5)
         self.long_break_entry.insert(0, "15")
+        self.long_break_entry.bind('<KeyRelease>', self.schedule_settings_update)
         
         # Cycles setting
         tk.Label(settings_frame, text="Cycles:", **label_style).grid(row=3, column=0, pady=5)
         self.cycles_entry = tk.Entry(settings_frame, **entry_style)
         self.cycles_entry.grid(row=3, column=1, pady=5)
         self.cycles_entry.insert(0, "4")
-        
-        # Update settings button
-        update_settings_button = tk.Button(settings_frame, text="Update Settings",
-                                           command=self.update_timer_settings,
-                                           bg=self.theme["accent"],
-                                           fg=self.theme["button_fg"],
-                                           font=("Segoe UI", 11, "bold"),
-                                           relief=tk.FLAT,
-                                           padx=20,
-                                           pady=5)
-        update_settings_button.grid(row=4, column=0, columnspan=2, pady=15)
+        self.cycles_entry.bind('<KeyRelease>', self.schedule_settings_update)
 
         self.populate_tasks()
+        
+        # Update window size after all widgets are placed
+        self.master.update_idletasks()  # Ensure all widgets are rendered
+        width = max(self.left_frame.winfo_reqwidth() + self.right_frame.winfo_reqwidth() + 80,
+                   900)  # minimum width of 900
+        height = max(self.left_frame.winfo_reqheight(),
+                    self.right_frame.winfo_reqheight()) + 60
+        self.master.geometry(f"{width}x{height}")
 
     def add_task(self):
         task_desc = self.task_entry.get().strip()
@@ -531,9 +600,63 @@ class ProductivityApp:
             delete_button.bind("<Enter>", lambda e, b=delete_button: b.configure(fg="#c0392b"))  # Darker red on hover
             delete_button.bind("<Leave>", lambda e, b=delete_button: b.configure(fg="#e74c3c"))
 
+    def shake_timer(self):
+        if self.shake_count >= 10:
+            self.shake_count = 0
+            # Restore the timer in its original position
+            self.timer_label.place_forget()
+            self.timer_label.pack(in_=self.right_frame, after=self.focused_task_label, pady=20)
+            self.original_timer_pos = None
+            return
+
+        # Store original position before first movement
+        if self.original_timer_pos is None:
+            self.original_timer_pos = (
+                self.timer_label.winfo_x(),
+                self.timer_label.winfo_y()
+            )
+
+        # Calculate offset based on shake count
+        offset = 10 if self.shake_count % 2 == 0 else -10
+        
+        # Move the label using place while maintaining vertical position
+        self.timer_label.place(x=self.original_timer_pos[0] + offset, 
+                             y=self.original_timer_pos[1])
+        
+        self.shake_count += 1
+        self.shake_animation_id = self.master.after(50, self.shake_timer)
+
+    def set_timer_color(self, is_zero=False):
+        """Update timer label color based on state"""
+        if is_zero:
+            self.timer_label.configure(fg="#e74c3c")  # Red color when timer hits zero
+        else:
+            self.timer_label.configure(fg=self.theme["accent"])  # Normal color
+
     def update_timer_display(self, time_str, cycle, timer_type):
         session_type = "Work" if timer_type == "work" else "Short Break" if timer_type == "short_break" else "Long Break"
         self.timer_label.config(text=time_str)
+        
+        # Check if timer is at zero
+        if time_str == "00:00":
+            self.set_timer_color(True)
+            if self.shake_animation_id is None:
+                # Store the current position before animation
+                self.original_timer_pos = (
+                    self.timer_label.winfo_x(),
+                    self.timer_label.winfo_y()
+                )
+                self.timer_label.pack_forget()
+                self.timer_label.pack(in_=self.right_frame, after=self.focused_task_label, before=self.controls_frame, pady=20)
+                self.shake_timer()
+        else:
+            self.set_timer_color(False)
+            if self.shake_animation_id is not None:
+                self.master.after_cancel(self.shake_animation_id)
+                self.shake_animation_id = None
+                # Restore with original padding and position
+                self.timer_label.place_forget()
+                self.timer_label.pack(in_=self.right_frame, after=self.focused_task_label, before=self.controls_frame, pady=20)
         
         # Update window title with focused task info
         focused_task = self.focused_task_label.cget("text")
@@ -566,8 +689,20 @@ class ProductivityApp:
             long_break_minutes = int(self.long_break_entry.get())
             cycles = int(self.cycles_entry.get())
             self.timer.update_settings(work_minutes, short_break_minutes, long_break_minutes, cycles)
+            self.save_settings()  # Add this line
         except ValueError:
             messagebox.showerror("Invalid input", "Please enter valid numbers for timer settings.")
+
+    def schedule_settings_update(self, event=None):
+        # Cancel the previous timer if it exists
+        if self.settings_update_timer is not None:
+            self.master.after_cancel(self.settings_update_timer)
+        
+        # Schedule a new timer
+        self.settings_update_timer = self.master.after(
+            self.settings_debounce_delay, 
+            self.update_timer_settings
+        )
 
     def toggle_filter_menu(self, event=None):
         # Get button position
